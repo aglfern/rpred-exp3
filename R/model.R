@@ -55,7 +55,7 @@ build_ats <- function(aevents, horiz, sel_attributes)
    full_mset <- list()
 
 
-   generate_log("   inicio dos loops",2)
+   generate_log("   Starting loops over all traces",2)
 
    for(i in 1:nrow(traces))
    {
@@ -168,23 +168,38 @@ build_ats <- function(aevents, horiz, sel_attributes)
 
    } # fim i
 
-   generate_log("   fim dos loops",2)
+   generate_log("   Ending loops over all traces",2)
 
    # retorna resultado - precisa atualizar a lista de eventos original, para os cálculos
    eval.parent(substitute(aevents<-events))
+
+   generate_log("   Summarizing the values for the model",2)
+   
+   # filtrar os valores que sao estados finais pois distorcem a media
+   #events_anot_filtered  <- events[events$remaining_stc > 0,]
+   events_anot_filtered <- events
+   
+   summary_set <- gen_summary_pred_fn(events_anot_filtered, 'set_state_id','remaining_stc')
+   summary_mset <- gen_summary_pred_fn(events_anot_filtered, 'mset_state_id','remaining_stc')
+   summary_seq <- gen_summary_pred_fn(events_anot_filtered, 'seq_state_id','remaining_stc')
+   
+   summary_sj_set <- gen_summary_pred_fn(events_anot_filtered, 'set_state_id','sojourn_set_stc')
+   summary_sj_mset <- gen_summary_pred_fn(events_anot_filtered, 'mset_state_id','sojourn_mset_stc')
+   summary_sj_seq <- gen_summary_pred_fn(events_anot_filtered, 'seq_state_id','sojourn_seq_stc')
+   
 
    mta_model <- list(traces_states=traces_states,
                      seq_state_list=seq_state_list,
                      set_state_list=set_state_list,
                      mset_state_list=mset_state_list,
-                     full_set=full_set,
-                     full_mset=full_mset,
-                     full_sequence=full_sequence,
+                     full_set=full_set, full_mset=full_mset, full_sequence=full_sequence,
+                     summary_set=summary_set, summary_mset=summary_mset, summary_seq=summary_seq,
+                     summary_sj_set=summary_sj_set, summary_sj_mset=summary_sj_mset, summary_sj_seq=summary_sj_seq,
                      horiz=horiz,
                      sel_attributes=sel_attributes
    )
 
-   #generate_log("Finalizando build_ats",2)
+   generate_log("Ended build_ats",2)
 
    return(mta_model)
 }
@@ -386,7 +401,7 @@ build_prediction <- function(aevents, ats)
             seq_in_non_fit_path <- set_in_non_fit_path <- mset_in_non_fit_path <- (stateId == NIL_STATE)
             if (seq_in_non_fit_path) {
                traceEvents[j,c("set_nf","mset_nf","seq_nf")] <- 1
-               stateId <- which.max(stringsim(a=seq_list[[j]], b=unlist(seq_state_list), method="dl", useBytes=FALSE))
+               stateId <- which.max(stringsim(a=seq_list[[j]], b=unlist(seq_state_list), method=SIM_METHOD_SEQ, useBytes=FALSE))
                similar_seq_id <- similar_set_id <- similar_mset_id <- stateId
             }
             traceEvents[j,c("set_state_id","mset_state_id","seq_state_id")] <- stateId
@@ -395,7 +410,7 @@ build_prediction <- function(aevents, ats)
             seq_in_non_fit_path <- ( stateId == NIL_STATE )
             if(seq_in_non_fit_path) {
                traceEvents[j,"seq_nf"] <- 1
-               stateId <- which.max(stringsim(a=seq_list[[j]], b=unlist(seq_state_list), method="dl", useBytes=FALSE))
+               stateId <- which.max(stringsim(a=seq_list[[j]], b=unlist(seq_state_list), method=SIM_METHOD_SEQ, useBytes=FALSE))
                similar_seq_id <- stateId
             }
             traceEvents[j,"seq_state_id"] <- stateId
@@ -416,7 +431,7 @@ build_prediction <- function(aevents, ats)
             if (set_in_non_fit_path) {
                # handling the non-fitting - using the DL distance to get the most similar entry
                traceEvents[j,"set_nf"] <- 1
-               stateId <- which.max(stringsim(a=set_list[[j]], b=unlist(set_state_list), method="jaccard", useBytes=FALSE))
+               stateId <- which.max(stringsim(a=set_list[[j]], b=unlist(set_state_list), method=SIM_METHOD_SET, useBytes=FALSE))
                similar_set_id <- stateId
             }
             traceEvents[j,"set_state_id"] <- stateId
@@ -439,7 +454,7 @@ build_prediction <- function(aevents, ats)
             mset_in_non_fit_path <- ( stateId == NIL_STATE )
             if(mset_in_non_fit_path) {
                traceEvents[j,"mset_nf"] <- 1
-               stateId <- which.max(stringsim(a=mset_list[[j]], b=unlist(mset_state_list), method="jaccard", useBytes=FALSE))
+               stateId <- which.max(stringsim(a=mset_list[[j]], b=unlist(mset_state_list), method=SIM_METHOD_MSET, useBytes=FALSE))
                similar_mset_id <- stateId
             }
             traceEvents[j,"mset_state_id"] <- stateId
@@ -448,7 +463,7 @@ build_prediction <- function(aevents, ats)
 
       } # end loop over trace events
       
-      #generate_log("Starting sojourn calculation")
+      #generate_log("Starting sojourn calculation",2)
 
       # Step 2, calculate the sojourn
       curr_sojourn_set_state <- traceEvents[1,"set_state_id"]
@@ -512,14 +527,14 @@ build_prediction <- function(aevents, ats)
    eval.parent(substitute(aevents<-events))
 
    mta_model <- list(traces_states=traces_states,
-                     seq_state_list=ats$seq_state_list,
-                     set_state_list=ats$set_state_list,
-                     mset_state_list=ats$mset_state_list,
+                     #seq_state_list=ats$seq_state_list,
+                     #set_state_list=ats$set_state_list,
+                     #mset_state_list=ats$mset_state_list,
                      horiz=ats$horiz,
                      sel_attributes=ats$sel_attributes
    )
 
-   #generate_log("Finalizando build_prediction",2)
+   generate_log("Ended build_prediction",2)
 
    return(mta_model)
 }
@@ -576,7 +591,7 @@ gen_summary_pred_fn <- function(data=NULL, groupvars=NULL, measurevar,  na.rm=TR
 
    datac$ci <- datac$se * ciMult
 
-   # registro para valores nÃ£o encontrados #non_fitting
+   # registro para valores nao encontrados #non_fitting
    datac <- rbind(datac,
                   c(NIL_STATE, sum(datac$N),  mean(datac$mean),  sd(datac$mean),
                     median(datac$mean), min(datac$mean), max(datac$mean))
@@ -606,7 +621,7 @@ gen_summary_pred_fn <- function(data=NULL, groupvars=NULL, measurevar,  na.rm=TR
 #' #eval_model_gen_fn <- function(lsel_traces_list)
 #' #eval_model_gen_fn <- function(events)
 #'
-annotate_model <- function(fold_events, resultFile, type, fold, horiz)
+annotate_model <- function(fold_events, resultFile, type, fold, horiz, model)
 {
    
    generate_log("Annotating the model...",2)
@@ -621,38 +636,39 @@ annotate_model <- function(fold_events, resultFile, type, fold, horiz)
    )
 
    # filtrar os valores que sao estados finais pois distorcem a media
-   events_anot_filtered  <- events_anot[events_anot$remaining_stc > 0,]
+   #events_anot_filtered  <- events_anot[events_anot$remaining_stc > 0,]
 
-   summary_set <- gen_summary_pred_fn(events_anot_filtered, 'set_state_id','remaining_stc')
-   summary_mset <- gen_summary_pred_fn(events_anot_filtered, 'mset_state_id','remaining_stc')
-   summary_seq <- gen_summary_pred_fn(events_anot_filtered, 'seq_state_id','remaining_stc')
-
-   summary_sj_set <- gen_summary_pred_fn(events_anot_filtered, 'set_state_id','sojourn_set_stc')
-   summary_sj_mset <- gen_summary_pred_fn(events_anot_filtered, 'mset_state_id','sojourn_mset_stc')
-   summary_sj_seq <- gen_summary_pred_fn(events_anot_filtered, 'seq_state_id','sojourn_seq_stc')
-
-   #armazena totais
-   summary_pred_stats <- list(summary_set, summary_mset, summary_seq,
-                              summary_sj_set, summary_sj_mset, summary_sj_seq)
+   # summary_set <- gen_summary_pred_fn(events_anot_filtered, 'set_state_id','remaining_stc')
+   # summary_mset <- gen_summary_pred_fn(events_anot_filtered, 'mset_state_id','remaining_stc')
+   # summary_seq <- gen_summary_pred_fn(events_anot_filtered, 'seq_state_id','remaining_stc')
+   # 
+   # summary_sj_set <- gen_summary_pred_fn(events_anot_filtered, 'set_state_id','sojourn_set_stc')
+   # summary_sj_mset <- gen_summary_pred_fn(events_anot_filtered, 'mset_state_id','sojourn_mset_stc')
+   # summary_sj_seq <- gen_summary_pred_fn(events_anot_filtered, 'seq_state_id','sojourn_seq_stc')
+   # 
+   # #armazena totais
+   # summary_pred_stats <- list(summary_set, summary_mset, summary_seq,
+   #                            summary_sj_set, summary_sj_mset, summary_sj_seq)
 
    # atualiza predited values media, mediana e desvio padrão
+   
    # set
    events_anot$remaining_stc_set_state_mean <-
-      summary_set$mean[match(events_anot$set_state_id, summary_set$set_state_id)]
+      model$summary_set$mean[match(events_anot$set_state_id, model$summary_set$set_state_id)]
    events_anot$sojourn_set_state_mean <-
-      summary_sj_set$mean[match(events_anot$set_state_id, summary_sj_set$set_state_id)]
+      model$summary_sj_set$mean[match(events_anot$set_state_id, model$summary_sj_set$set_state_id)]
 
    # multi set
    events_anot$remaining_stc_mset_state_mean <-
-      summary_mset$mean[match(events_anot$mset_state_id, summary_mset$mset_state_id)]
+      model$summary_mset$mean[match(events_anot$mset_state_id, model$summary_mset$mset_state_id)]
    events_anot$sojourn_mset_state_mean <-
-      summary_sj_mset$mean[match(events_anot$mset_state_id, summary_sj_mset$mset_state_id)]
+      model$summary_sj_mset$mean[match(events_anot$mset_state_id, model$summary_sj_mset$mset_state_id)]
 
    # sequence
    events_anot$remaining_stc_seq_state_mean <-
-      summary_seq$mean[match(events_anot$seq_state_id, summary_seq$seq_state_id)]
+      model$summary_seq$mean[match(events_anot$seq_state_id, model$summary_seq$seq_state_id)]
    events_anot$sojourn_seq_state_mean <-
-      summary_sj_seq$mean[match(events_anot$seq_state_id, summary_sj_seq$seq_state_id)]
+      model$summary_sj_seq$mean[match(events_anot$seq_state_id, model$summary_sj_seq$seq_state_id)]
 
 
    if ( INCLUDE_SOJOURN_IN_PREDICTION ) {
@@ -761,7 +777,7 @@ annotate_model <- function(fold_events, resultFile, type, fold, horiz)
 
    # returns only the summarized results for the given fold and horizon
    result <- c(fold=type, horizon=horiz, mape_val, non_fit_arr, non_fit_per_arr, perr_tot_arr, 
-               mape_val1, rmspe_val, rmspe_val1, exact_match)
+               mape_val1, rmspe_val, rmspe_val1, mapePerc, exact_match)
 
    return(result)
 
