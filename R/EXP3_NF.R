@@ -9,8 +9,10 @@ CLOSED_STATUS_VALUE <- "Closed"
 REMOVE_LONGER_CASES <- FALSE
 INCLUDE_SOJOURN_IN_PREDICTION <- FALSE
 
-SIM_METHOD_SET <- "dl"
-SIM_METHOD_MSET <- "dl"
+SEARCH_SIMILAR <- TRUE
+# possible methods are dl, jaccard
+SIM_METHOD_SET <- "jaccard" 
+SIM_METHOD_MSET <- "jaccard"
 SIM_METHOD_SEQ <- "dl"
 
 
@@ -34,17 +36,21 @@ HORIZONS <- c(1,3,5,6,7,Inf)
 # id=5: jaccard, jaccard, jaccard
 # id=6: dl, dl, dl (bug fixed)
 
-id <- 6
+# execuções em "usp"
+# id=1: nova baseline
+# id=3: com bugfix
+
+id <- 3
 
 selected_attributes <- c("caller_id", "assigned_to")
 
-test_nf <- exec_all_horizons(s=selected_attributes,runId=id)
+test_nf3 <- exec_all_horizons(s=selected_attributes,runId=id)
 
-test_nf2 <- exec_all_horizons(h=c(3,5,6,7,Inf),selected_attributes,id)
+#test_nf2 <- exec_all_horizons(h=c(3,5,6,7,Inf),selected_attributes,id)
 
-test_h1 <- main(horizon=1,sel_attributes=selected_attributes,runId=id)
+#test_h1 <- main(horizon=1,sel_attributes=selected_attributes,runId=id)
 
-test_h3 <- main(horizon=3,sel_attributes=selected_attributes,runId=id)
+#test_h3 <- main(horizon=3,sel_attributes=selected_attributes,runId=id)
 
 
 
@@ -75,26 +81,29 @@ exec_all_horizons <- function(h=HORIZONS,s,runId)
 
 
 main <- function(horizon=selected_horizon, sel_attributes=selected_attributes, runId,
-                        training_fn="fold1_train.csv",validation_fn="fold1_test.csv")
+                 training_fn="fold1_train.csv",validation_fn="fold1_test.csv")
 {
    generate_log(" ************* Initiating EXP 3 for handling the Non-Fitting *************", 1)
    generate_log(EXECUTION_DESCRIPTION)
    generate_log(paste(" REMOVE_LONGER_CASES == ",REMOVE_LONGER_CASES))
    generate_log(paste(" INCLUDE_SOJOURN_IN_PREDICTION == ",INCLUDE_SOJOURN_IN_PREDICTION))
-   generate_log(paste(" SIMILARITY FOR HANDLING NON-FITTING: set=", SIM_METHOD_SET, "mset=", SIM_METHOD_MSET, "seq=", SIM_METHOD_SEQ))
+   if ( SEARCH_SIMILAR )
+      generate_log(paste(" SIMILARITY FOR HANDLING NON-FITTING: set=", SIM_METHOD_SET, "mset=", SIM_METHOD_MSET, "seq=", SIM_METHOD_SEQ))
+   else
+      generate_log(paste(" SEARCH FOR SIMILARITY = ", SEARCH_SIMILAR, " (searching only exact matches)"))
    generate_log(paste("Training file: ",training_fn,"Validation file:",validation_fn))
-
+   
    startTime <- Sys.time()
-
+   
    # the base name for the files that will store all the results
    statsFile <- paste("results_EXP3_NF_",runId,"_",format(startTime, "%Y%m%d-%H%M"),sep="")
-
+   
    model <- NULL
    predict <- NULL
    eval_stats_arr <- NULL
-
+   
    trainingFold <- read.csv(file=file.path("data", training_fn)) #,nrows = 104)
-
+   
    #option to remove from the training the outliers with elapsed time much bigger
    if ( REMOVE_LONGER_CASES == TRUE ) {
       q <- quantile(trainingFold$elapsed_stc,0.99)
@@ -105,9 +114,9 @@ main <- function(horizon=selected_horizon, sel_attributes=selected_attributes, r
       '%ni%' <- Negate('%in%')
       trainingFold <- trainingFold[trainingFold$number %ni% onePercDist$number,]
    }
-
+   
    rfn <- file.path("data/test",paste(statsFile,"_pred.csv",sep=""))
-
+   
    # builds the transition system
    model <- build_ats(trainingFold,horizon,sel_attributes)
    
@@ -117,38 +126,38 @@ main <- function(horizon=selected_horizon, sel_attributes=selected_attributes, r
    
    # anotates the transition system
    training_stats <- annotate_model(trainingFold, rfn, "T", 0, horizon, model)
-
+   
    # prediction over the validation data set
    testingFold <- read.csv(file=file.path("data", validation_fn)) #,nrows = 104)
    
    testingFold$set_nf <- 0
    testingFold$mset_nf <- 0
    testingFold$seq_nf <- 0
-
+   
    # builds the transition system for teh testing fold
    predict <- build_prediction(testingFold,model)
    validation_stats <- annotate_model(testingFold, rfn, "V", 0, horizon, model)
-
+   
    eval_stats_arr <- rbind(training_stats, validation_stats)
-
-
+   
+   
    eval_stats_df1 <- data.frame(eval_stats_arr)
-
+   
    string_attrib <- paste(unlist(sel_attributes),collapse=",")
    eval_stats_df1 <- cbind(start=format(startTime, "%Y-%m-%d %H:%M:%S"),end=format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
                            at="laptop", attributes=string_attrib,eval_stats_df1)
-
+   
    sfilen <- file.path("data/test",paste(statsFile,"_STATS.csv",sep=""))
    write.table(eval_stats_df1, file=sfilen, row.names=FALSE, col.names = TRUE, sep=";", dec=",")
    
    generate_log(paste("Stat file generated: [",statsFile,"_STATS.csv]",sep=""))
    generate_log("Step completed successfully.",2)
-
+   
    #eval.parent(substitute(LAST_RUN_MODEL<-model))
    #eval.parent(substitute(LAST_RUN_PREDICT<-predict))
    
    return(eval_stats_df1)
-
+   
 }
 
 MODEL_H1 <- model
