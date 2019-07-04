@@ -1,11 +1,6 @@
 
 NIL_STATE <- -1
 
-INCLUDE_SOJOURN_IN_PREDICTION <- FALSE
-
-
-
-
 
 #' funcao de construcao do MTA, recebe o trace, lista de instancias
 #' Código fonte original
@@ -53,7 +48,6 @@ build_ats <- function(aevents, horiz, sel_attributes)
    full_sequence <- list()
    full_set <- list()
    full_mset <- list()
-   
    
    generate_log("   Starting loops over all traces",2)
    
@@ -170,12 +164,20 @@ build_ats <- function(aevents, horiz, sel_attributes)
    
    generate_log("   Ending loops over all traces",2)
    
+   # initializes these attributes - they will not be used here, but will be necessary for the prediction
+   events$set_nf <- 0
+   events$mset_nf <- 0
+   events$seq_nf <- 0
+   
    # retorna resultado - precisa atualizar a lista de eventos original, para os cálculos
    eval.parent(substitute(aevents<-events))
    
    generate_log("   Summarizing the values for the model",2)
    
    # filtrar os valores que sao estados finais pois distorcem a media
+   # Alexandre: version exp3 NF:
+   # removed this filter to avoid states not present in the summary because they were always the final states
+   # in the training - but it does not mean that they would not appear somewhere else in the validation data.
    #events_anot_filtered  <- events[events$remaining_stc > 0,]
    events_anot_filtered <- events
    
@@ -343,7 +345,11 @@ build_prediction <- function(aevents, ats)
    set_state_list <- ats$set_state_list
    mset_state_list <- ats$mset_state_list
    
-   
+   # initializes the flags to indicate if the event is going for a non-fitting path
+   events$set_nf <- 0
+   events$mset_nf <- 0
+   events$seq_nf <- 0
+      
    for(i in 1:nrow(traces))
    {
       #generate_log(paste("trace ",i,traces$number[i]),2)
@@ -399,12 +405,12 @@ build_prediction <- function(aevents, ats)
          if (ats$horiz==1) # horizonte 1, todos iguais
          {
             if (SEARCH_SIMILAR) {
-               seq_in_non_fit_path <- set_in_non_fit_path <- mset_in_non_fit_path <- (stateId == NIL_STATE)
-               if (seq_in_non_fit_path) {
-                  traceEvents[j,c("set_nf","mset_nf","seq_nf")] <- 1
-                  stateId <- which.max(stringsim(a=seq_list[[j]], b=unlist(seq_state_list), method=SIM_METHOD_SEQ, useBytes=FALSE))
-                  similar_seq_id <- similar_set_id <- similar_mset_id <- stateId
-               }
+              seq_in_non_fit_path <- set_in_non_fit_path <- mset_in_non_fit_path <- (stateId == NIL_STATE)
+              if (seq_in_non_fit_path) {
+                 traceEvents[j,c("set_nf","mset_nf","seq_nf")] <- 1
+                 stateId <- which.max(stringsim(a=seq_list[[j]], b=unlist(seq_state_list), method=SIM_METHOD_SEQ, useBytes=FALSE))
+                 similar_seq_id <- similar_set_id <- similar_mset_id <- stateId
+              }
             }
             traceEvents[j,c("set_state_id","mset_state_id","seq_state_id")] <- stateId
          } else {
@@ -469,44 +475,10 @@ build_prediction <- function(aevents, ats)
          } # end if horizon == 1
          
       } # end loop over trace events
-      
-      #generate_log("Starting sojourn calculation",2)
-      
+
       # Step 2, calculate the sojourn
-      curr_sojourn_set_state <- traceEvents[1,"set_state_id"]
-      curr_sojourn_mset_state <- traceEvents[1,"mset_state_id"]
-      curr_sojourn_seq_state <- traceEvents[1,"seq_state_id"]
-      curr_sojourn_set_stc <- 0
-      curr_sojourn_mset_stc <- 0
-      curr_sojourn_seq_stc <- 0
-      # first event of each case, the sojourn will be always zero
-      for (j in 2:nrow(traceEvents))
-      {
-         #print(paste("inicio loop 2: ",j))
-         
-         elapsed <- traceEvents[j,"elapsed_stc"]
-         # advances until it reaches a distinct state - for SET
-         if ( traceEvents[j,"set_state_id"] != curr_sojourn_set_state ) {
-            curr_sojourn_set_state <- traceEvents[j,"set_state_id"]
-            traceEvents[j,"sojourn_set_stc"] <- elapsed - curr_sojourn_set_stc
-            curr_sojourn_set_stc <- elapsed
-         }
-         
-         # now for MULTI-SET
-         if ( traceEvents[j,"mset_state_id"] != curr_sojourn_mset_state ) {
-            curr_sojourn_mset_state <- traceEvents[j,"mset_state_id"]
-            traceEvents[j,"sojourn_mset_stc"] <- elapsed - curr_sojourn_mset_stc
-            curr_sojourn_mset_stc <- elapsed
-         }
-         
-         # and now for SEQUENCE
-         if ( traceEvents[j,"seq_state_id"] != curr_sojourn_seq_state ) {
-            curr_sojourn_seq_state <- traceEvents[j,"seq_state_id"]
-            traceEvents[j,"sojourn_seq_stc"] <- elapsed - curr_sojourn_seq_stc
-            curr_sojourn_seq_stc <- elapsed
-         }
-      } # fim j
-      
+      calculate_sojourn_v2(traceEvents)
+
       # armazena resultado das transicoes de estado para instancia atual
       # modelo de abstracao sequencia
       traces_states$seq_states[i] <- list(traceEvents[,"seq_state_id"])
@@ -528,7 +500,7 @@ build_prediction <- function(aevents, ats)
       events[events$number == traces$number[i],]$mset_nf <- traceEvents$mset_nf
       events[events$number == traces$number[i],]$seq_nf <- traceEvents$seq_nf
       
-   } # fim i
+   } # end loop over all the traces
    
    # retorna resultado - precisa atualizar a lista de eventos original, para os cálculos
    eval.parent(substitute(aevents<-events))
@@ -639,54 +611,43 @@ annotate_model <- function(fold_events, resultFile, type, fold, horiz, model)
    events_anot <- as.data.frame(
       fold_events[, c("number", "updated_at", "incident_state", "seq_state_id","set_state_id", "mset_state_id",
                       "sojourn_set_stc","sojourn_mset_stc","sojourn_seq_stc","elapsed_stc", "remaining_stc",
-                      "set_nf", "mset_nf", "seq_nf")]
-   )
-   
-   # filtrar os valores que sao estados finais pois distorcem a media
-   #events_anot_filtered  <- events_anot[events_anot$remaining_stc > 0,]
-   
-   # summary_set <- gen_summary_pred_fn(events_anot_filtered, 'set_state_id','remaining_stc')
-   # summary_mset <- gen_summary_pred_fn(events_anot_filtered, 'mset_state_id','remaining_stc')
-   # summary_seq <- gen_summary_pred_fn(events_anot_filtered, 'seq_state_id','remaining_stc')
-   # 
-   # summary_sj_set <- gen_summary_pred_fn(events_anot_filtered, 'set_state_id','sojourn_set_stc')
-   # summary_sj_mset <- gen_summary_pred_fn(events_anot_filtered, 'mset_state_id','sojourn_mset_stc')
-   # summary_sj_seq <- gen_summary_pred_fn(events_anot_filtered, 'seq_state_id','sojourn_seq_stc')
-   # 
-   # #armazena totais
-   # summary_pred_stats <- list(summary_set, summary_mset, summary_seq,
-   #                            summary_sj_set, summary_sj_mset, summary_sj_seq)
-   
-   # atualiza predited values media, mediana e desvio padrão
+                      "set_nf", "mset_nf", "seq_nf")])
    
    # set
-   events_anot$remaining_stc_set_state_mean <-
+   events_anot$set_state_remain_stc <-
       model$summary_set$mean[match(events_anot$set_state_id, model$summary_set$set_state_id)]
-   events_anot$sojourn_set_state_mean <-
+   events_anot$set_state_sj_stc <-
       model$summary_sj_set$mean[match(events_anot$set_state_id, model$summary_sj_set$set_state_id)]
-   
+
+#   events_anot$set_state_remain_sd <-
+#      model$summary_set$sd[match(events_anot$set_state_id, model$summary_set$set_state_id)]
+      
    # multi set
-   events_anot$remaining_stc_mset_state_mean <-
+   events_anot$mset_state_remain_stc <-
       model$summary_mset$mean[match(events_anot$mset_state_id, model$summary_mset$mset_state_id)]
-   events_anot$sojourn_mset_state_mean <-
+   events_anot$mset_state_sj_stc <-
       model$summary_sj_mset$mean[match(events_anot$mset_state_id, model$summary_sj_mset$mset_state_id)]
+
+#   events_anot$mset_state_remain_sd <-
+#      model$summary_mset$sd[match(events_anot$mset_state_id, model$summary_mset$mset_state_id)]
    
    # sequence
-   events_anot$remaining_stc_seq_state_mean <-
+   events_anot$seq_state_remain_stc <-
       model$summary_seq$mean[match(events_anot$seq_state_id, model$summary_seq$seq_state_id)]
-   events_anot$sojourn_seq_state_mean <-
+   events_anot$seq_state_sj_stc <-
       model$summary_sj_seq$mean[match(events_anot$seq_state_id, model$summary_sj_seq$seq_state_id)]
    
-   
-   if ( INCLUDE_SOJOURN_IN_PREDICTION ) {
-      # prediction based in the mean and sojourn
-      calculate_prediction_f1(events_anot)
-   } else {
-      # prediction based only in the mean
-      calculate_prediction_f2(events_anot)
-   }
+#   events_anot$seq_state_remain_sd <-
+#      model$summary_seq$sd[match(events_anot$seq_state_id, model$summary_seq$seq_state_id)]
    
    
+   # prediction based only in the mean
+   calculate_prediction(events_anot)
+
+   # prediction based in the mean and sojourn
+   calculate_prediction_with_sojourn(events_anot)
+   
+
    
    # remove valorers sem match para calculo erro
    # funcao remove todas as linhas que tiverem alguma coluna missing (nula)
@@ -699,17 +660,17 @@ annotate_model <- function(fold_events, resultFile, type, fold, horiz, model)
    
    #MAPE(y_pred, y_true)
    mape_val <- c(
-      MAPE(events_anot_filtered$remaining_stc_pset_mean, events_anot_filtered$remaining_stc),
-      MAPE(events_anot_filtered$remaining_stc_pmset_mean, events_anot_filtered$remaining_stc),
-      MAPE(events_anot_filtered$remaining_stc_pseq_mean, events_anot_filtered$remaining_stc)
+      MAPE(events_anot_filtered$predict_remain_set, events_anot_filtered$remaining_stc),
+      MAPE(events_anot_filtered$predict_remain_mset, events_anot_filtered$remaining_stc),
+      MAPE(events_anot_filtered$predict_remain_seq, events_anot_filtered$remaining_stc)
    )
    names(mape_val) <- c("MAPE_SET","MAPE_MSET","MAPE_SEQ")
    
    #RMSPE(y_pred, y_true)
    rmspe_val <- c(
-      RMSPE(events_anot_filtered$remaining_stc_pset_mean, events_anot_filtered$remaining_stc),
-      RMSPE(events_anot_filtered$remaining_stc_pmset_mean, events_anot_filtered$remaining_stc),
-      RMSPE(events_anot_filtered$remaining_stc_pseq_mean, events_anot_filtered$remaining_stc)
+      RMSPE(events_anot_filtered$predict_remain_set, events_anot_filtered$remaining_stc),
+      RMSPE(events_anot_filtered$predict_remain_mset, events_anot_filtered$remaining_stc),
+      RMSPE(events_anot_filtered$predict_remain_seq, events_anot_filtered$remaining_stc)
    )
    names(rmspe_val) <- c("RMSPE_SET", "RMSPE_MSET", "RMSPE_SEQ")
    
@@ -718,9 +679,9 @@ annotate_model <- function(fold_events, resultFile, type, fold, horiz, model)
    non_fit_arr <- c(
       nrow(fold_events),
       nrow(events_anot),
-      nrow(events_anot[events_anot$set_state_id == NIL_STATE,]),
-      nrow(events_anot[events_anot$mset_state_id == NIL_STATE,]),
-      nrow(events_anot[events_anot$seq_state_id == NIL_STATE,]),
+      nrow(events_anot[events_anot$set_nf == 1,]),
+      nrow(events_anot[events_anot$mset_nf == 1,]),
+      nrow(events_anot[events_anot$seq_nf == 1,]),
       length(unique(events_anot$set_state_id)),
       length(unique(events_anot$mset_state_id)),
       length(unique(events_anot$seq_state_id))
@@ -729,21 +690,47 @@ annotate_model <- function(fold_events, resultFile, type, fold, horiz, model)
                            "NF_SET", "NF_MSET","NF_SEQ", 
                            "STATES_SET", "STATES_MSET", "STATES_SEQ")
    non_fit_per_arr <- c(
-      non_fit_arr[c("num_evt_nf_set")] / non_fit_arr[c("num_evt_ok")],
-      non_fit_arr[c("num_evt_nf_mset")] / non_fit_arr[c("num_evt_ok")],
-      non_fit_arr[c("num_evt_nf_seq")] / non_fit_arr[c("num_evt_ok")]
+      non_fit_arr[c("NF_SET")] / non_fit_arr[c("TOT_EVT_OK")] * 100,
+      non_fit_arr[c("NF_MSET")] / non_fit_arr[c("TOT_EVT_OK")] * 100,
+      non_fit_arr[c("NF_SEQ")] / non_fit_arr[c("TOT_EVT_OK")] * 100
    )
    names(non_fit_per_arr) <- c("NF_PERC_SET","NF_PERC_MSET","NF_PERC_SEQ")
    
-   non_fit_per_arr <- non_fit_per_arr * 100
-   
    # Alexandre: precisa remover esse cálculo aqui, não faz nenhum sentido repetir esse valor
    # vide comentário na função original - isso era um mínimo entre média e mediana
-   perr_tot_arr <- c(mape_val[c("val_mape_pset_mean")],
-                     mape_val[c("val_mape_pmset_mean")],
-                     mape_val[c("val_mape_pseq_mean")])
+   #perr_tot_arr <- c(mape_val[c("val_mape_pset_mean")],
+   #                  mape_val[c("val_mape_pmset_mean")],
+   #                  mape_val[c("val_mape_pseq_mean")])
+   #
+   #names(perr_tot_arr) <- c("perr_tot_set","perr_tot_mset","perr_tot_seq")
    
-   names(perr_tot_arr) <- c("perr_tot_set","perr_tot_mset","perr_tot_seq")
+   # Substituindo número anterior pelo desvio padrão do erro
+   error_sd <- c(
+      sd(events_anot_filtered$remaining_stc-events_anot_filtered$predict_remain_set),
+      sd(events_anot_filtered$remaining_stc-events_anot_filtered$predict_remain_mset),
+      sd(events_anot_filtered$remaining_stc-events_anot_filtered$predict_remain_seq)
+   )
+   names(error_sd) <- c("error_sd_set","error_sd_mset","error_sd_seq")
+   
+   # CALCULATES FOR THE PREDICTION USING THE SOJOURN
+   
+   #MAPE(y_pred, y_true)
+   mape_sj_val <- c(
+      MAPE(events_anot_filtered$predict_remain_set_sj, events_anot_filtered$remaining_stc),
+      MAPE(events_anot_filtered$predict_remain_mset_sj, events_anot_filtered$remaining_stc),
+      MAPE(events_anot_filtered$predict_remain_seq_sj, events_anot_filtered$remaining_stc)
+   )
+   mape_sj_val <- mape_sj_val * 100
+   names(mape_sj_val) <- c("MAPE_PERC_SET_SJ","MAPE_PERC_MSET_SJ","MAPE_PERC_SEQ_SJ")
+   
+   #RMSPE(y_pred, y_true)
+   rmspe_sj_val <- c(
+      RMSPE(events_anot_filtered$predict_remain_set_sj, events_anot_filtered$remaining_stc),
+      RMSPE(events_anot_filtered$predict_remain_mset_sj, events_anot_filtered$remaining_stc),
+      RMSPE(events_anot_filtered$predict_remain_seq_sj, events_anot_filtered$remaining_stc)
+   )
+   names(rmspe_sj_val) <- c("RMSPE_SET_SJ", "RMSPE_MSET_SJ", "RMSPE_SEQ_SJ")
+   
    
    # filtro para eventos com fit
    events_anot_filtered_fitted_set <- events_anot_filtered[events_anot_filtered$set_state_id != NIL_STATE,]
@@ -751,17 +738,17 @@ annotate_model <- function(fold_events, resultFile, type, fold, horiz, model)
    events_anot_filtered_fitted_seq <- events_anot_filtered[events_anot_filtered$seq_state_id != NIL_STATE,]
    
    mape_val1 <- c(
-      MAPE(events_anot_filtered_fitted_set$remaining_stc_pset_mean, events_anot_filtered_fitted_set$remaining_stc),
-      MAPE(events_anot_filtered_fitted_mset$remaining_stc_pmset_mean, events_anot_filtered_fitted_mset$remaining_stc),
-      MAPE(events_anot_filtered_fitted_seq$remaining_stc_pseq_mean, events_anot_filtered_fitted_seq$remaining_stc)
+      MAPE(events_anot_filtered_fitted_set$predict_remain_set, events_anot_filtered_fitted_set$remaining_stc),
+      MAPE(events_anot_filtered_fitted_mset$predict_remain_mset, events_anot_filtered_fitted_mset$remaining_stc),
+      MAPE(events_anot_filtered_fitted_seq$predict_remain_seq, events_anot_filtered_fitted_seq$remaining_stc)
    )
    names(mape_val1) <- c("MAPE_FIT_SET","MAPE_FIT_MSET","MAPE_FIT_SEQ")
    
    #RMSPE(y_pred, y_true)
    rmspe_val1 <- c(
-      RMSPE(events_anot_filtered_fitted_set$remaining_stc_pset_mean, events_anot_filtered_fitted_set$remaining_stc),
-      RMSPE(events_anot_filtered_fitted_mset$remaining_stc_pmset_mean, events_anot_filtered_fitted_mset$remaining_stc),
-      RMSPE(events_anot_filtered_fitted_seq$remaining_stc_pseq_mean, events_anot_filtered_fitted_seq$remaining_stc)
+      RMSPE(events_anot_filtered_fitted_set$predict_remain_set, events_anot_filtered_fitted_set$remaining_stc),
+      RMSPE(events_anot_filtered_fitted_mset$predict_remain_mset, events_anot_filtered_fitted_mset$remaining_stc),
+      RMSPE(events_anot_filtered_fitted_seq$predict_remain_seq, events_anot_filtered_fitted_seq$remaining_stc)
    )
    names(rmspe_val1) <- c("RMSPE_FIT_SET", "RMSPE_FIT_MSET", "RMSPE_FIT_SEQ")
    
@@ -776,15 +763,17 @@ annotate_model <- function(fold_events, resultFile, type, fold, horiz, model)
       exact_match <- rep(nrow(events_anot),3)
    }   
    
-   names(exact_match) <- c("exact_matches_set", "exact_matches_mset", "exact_matches_seq")
+   names(exact_match) <- c("EXACT_MATCH_SET", "EXACT_MATCH_MSET", "EXACT_MATCH_SEQ")
+
    
+      
    # appends to the file that contains all the stats so the error can be recalculated later
    events_anot <- cbind(type,fold,horiz,events_anot)
    write.table(events_anot, file=resultFile, row.names=FALSE, col.names = TRUE, append=TRUE, sep=";", dec=",")
    
    # returns only the summarized results for the given fold and horizon
-   result <- c(fold=type, horizon=horiz, mape_val, non_fit_arr, non_fit_per_arr, perr_tot_arr, 
-               mape_val1, rmspe_val, rmspe_val1, mapePerc, exact_match)
+   result <- c(fold=type, horizon=horiz, mape_val, non_fit_arr, non_fit_per_arr, error_sd, 
+               mape_val1, rmspe_val, rmspe_val1, mapePerc, exact_match, mape_sj_val, rmspe_sj_val)
    
    return(result)
    
@@ -800,23 +789,23 @@ annotate_model <- function(fold_events, resultFile, type, fold, horiz, model)
 #' @export
 #'
 #' @examples
-calculate_prediction_f1 <- function(aevents_anot) {
+calculate_prediction_with_sojourn <- function(aevents_anot) {
    
    events_anot <- aevents_anot
    
-   events_anot$remaining_stc_pset_mean <-
-      events_anot$remaining_stc_set_state_mean +
-      events_anot$sojourn_set_state_mean -
+   events_anot$predict_remain_set_sj <-
+      events_anot$set_state_remain_stc +
+      events_anot$set_state_sj_stc -
       events_anot$sojourn_set_stc
    
-   events_anot$remaining_stc_pmset_mean <-
-      events_anot$remaining_stc_mset_state_mean +
-      events_anot$sojourn_mset_state_mean -
+   events_anot$predict_remain_mset_sj <-
+      events_anot$mset_state_remain_stc +
+      events_anot$mset_state_sj_stc -
       events_anot$sojourn_mset_stc
    
-   events_anot$remaining_stc_pseq_mean <-
-      events_anot$remaining_stc_seq_state_mean +
-      events_anot$sojourn_seq_state_mean -
+   events_anot$predict_remain_seq_sj <-
+      events_anot$seq_state_remain_stc +
+      events_anot$seq_state_sj_stc -
       events_anot$sojourn_seq_stc
    
    eval.parent(substitute(aevents_anot<-events_anot))
@@ -831,294 +820,76 @@ calculate_prediction_f1 <- function(aevents_anot) {
 #' @export
 #'
 #' @examples
-calculate_prediction_f2 <- function(aevents_anot) {
+calculate_prediction <- function(aevents_anot) {
    
    events_anot <- aevents_anot
    
-   events_anot$remaining_stc_pset_mean <- events_anot$remaining_stc_set_state_mean
-   events_anot$remaining_stc_pmset_mean <- events_anot$remaining_stc_mset_state_mean
-   events_anot$remaining_stc_pseq_mean <- events_anot$remaining_stc_seq_state_mean
+   events_anot$predict_remain_set <- events_anot$set_state_remain_stc
+   events_anot$predict_remain_mset <- events_anot$mset_state_remain_stc
+   events_anot$predict_remain_seq <- events_anot$seq_state_remain_stc
    
    eval.parent(substitute(aevents_anot<-events_anot))
    
 }
 
+reshapeStateList <- function(ds) {
+   n <- max(sapply(ds, length))
+   rds <- lapply(ds, function(X) {
+      c(as.character(X), rep("", times = n - length(X)))
+   })
+   out <- do.call(rbind, rds)
+   return(out)
+}
 
+save_model <- function(model, startTime, filePath, filePrefix)
+{
+   
+   # SET data
+   if (length(model$full_set) > 0) {
+      sfilen <- file.path(filePath,paste(filePrefix,"_MODEL_SET.csv",sep=""))
+      r <- reshapeStateList(model$full_set)
+      write.table(r, file=sfilen, row.names=TRUE, col.names = FALSE, sep=";", dec=",")
+   }
+   # SET Summary
+   sfilen <- file.path(filePath,paste(filePrefix,"_MODEL_SET_SUMM.csv",sep=""))
+   summary <- merge(model$summary_set, model$summary_sj_set, by = "set_state_id", suffixes = c("", "_sj"))
+   write.table(summary, file=sfilen, row.names=FALSE, col.names = TRUE, sep=";", dec=",")
 
+   # MSET data
+   if (length(model$full_mset) > 0) {
+      sfilen <- file.path(filePath,paste(filePrefix,"_MODEL_MSET.csv",sep=""))
+      r <- reshapeStateList(model$full_mset)
+      write.table(r, file=sfilen, row.names=TRUE, col.names = FALSE, sep=";", dec=",")
+   }
+   # MSET summary
+   sfilen <- file.path(filePath,paste(filePrefix,"_MODEL_MSET_SUMM.csv",sep=""))
+   summary <- merge(model$summary_mset, model$summary_sj_mset, by = "mset_state_id", suffixes = c("", "_sj"))
+   write.table(summary, file=sfilen, row.names=FALSE, col.names = TRUE, sep=";", dec=",")
 
+   # SEQ data
+   if (length(model$full_seq) > 0) {
+      sfilen <- file.path(filePath,paste(filePrefix,"_MODEL_SEQ.csv",sep=""))
+      r <- reshapeStateList(model$full_seq)
+      write.table(r, file=sfilen, row.names=TRUE, col.names = FALSE, sep=";", dec=",")
+   }
+   # SEQ Summary
+   sfilen <- file.path(filePath,paste(filePrefix,"_MODEL_SEQ_SUMM.csv",sep=""))
+   summary <- merge(model$summary_seq, model$summary_sj_seq, by = "seq_state_id", suffixes = c("", "_sj"))
+   write.table(summary, file=sfilen, row.names=FALSE, col.names = TRUE, sep=";", dec=",")
+   
+   # General Parameters
+   parameters <- c("SEL ATTRIBUTES", paste(unlist(model$sel_attributes),collapse=","))
+   parameters <- rbind(parameters, c("HORIZON", model$horiz))
+   parameters <- rbind(parameters, c("START TIME", format(startTime, "%Y-%m-%d %H:%M:%S")))
+   parameters <- rbind(parameters, c("EXECUTION_DESCRIPTION", EXECUTION_DESCRIPTION))
+   parameters <- rbind(parameters, c("REMOVE_LONGER_CASES", REMOVE_LONGER_CASES))
+   parameters <- rbind(parameters, c("SEARCH_SIMILAR", SEARCH_SIMILAR))
+   parameters <- rbind(parameters, c("SIM_METHOD_SET", SIM_METHOD_SET))
+   parameters <- rbind(parameters, c("SIM_METHOD_MSET", SIM_METHOD_MSET))
+   parameters <- rbind(parameters, c("SIM_METHOD_SEQ", SIM_METHOD_SEQ))
 
-
-# ----- removed / deprecated functions ------
-
-
-#' DEPRECATED
-#'
-#' @param astate_list
-#' @param asigma
-#' @param amode
-#'
-#' @return
-#' @export
-#'
-#' @examples
-# state_fn2 <- function(astate_list, asigma, amode = "sequence")
-# {
-#    # pesquisa lista de estados
-#    lstate_list <- astate_list
-#    # print(asigma)
-#    # print(lstate_list)
-#    Result <- match(asigma, lstate_list)
-#    if (is.na(Result))
-#    {
-#       Result = length(lstate_list) + 1
-#       # print(Result)
-#       lstate_list[Result] <- asigma
-#       eval.parent(substitute(astate_list<-lstate_list))
-#    }
-#    return(Result)
-# }
-
-#
-# Alexandre: funcao removida, trocada pelo match, com parametro de retorno quando NO MATCH
-#
-# find_state_fn2 <- function(astate_list, asigma, amode = "sequence")
-# {
-#    # pesquisa lista de estados
-#    Result <- match(asigma, astate_list)
-#    if (is.na(Result))
-#    {
-#       Result = NIL_STATE
-#    }
-#    return(Result)
-# }
-
-
-
-
-#' DEPRECATED
-#'
-#' @param lsel_traces_list
-#'
-#' @return
-#' @export
-#'
-#' @examples
-#eval_model_gen_fn <- function(lsel_traces_list)
-# eval_model_gen_fn <- function(events)
-# {
-#    summary_pred_stats <- NULL
-#    result <- NULL
-# #   for (sel_trace_ in lsel_traces_list)
-#    for (fold_events in events)
-#    {
-#       #incidentevtlog_anot<- as.data.frame(
-#       events_anot <- as.data.frame(
-#          fold_events[, c("number", "updated_at", "incident_state", "seq_state_id","set_state_id", "mset_state_id",
-#                         "sojourn_set_stc","sojourn_mset_stc","sojourn_seq_stc","elapsed_stc", "remaining_stc")]
-#       )
-# 
-#       # teste estatistica convertida # Alexandre: o que faz esse código aqui?
-#       events_anot$remaining_stc <- events_anot$remaining_stc
-# 
-#       # gerar as contagens e medias por estado
-#       # num_secs <- 1 * 60 * 60 # em horas
-#       # num_secs <- 1 # em segundos
-#       # inc.outlier <- T
-# 
-#       # Gera informaÃ§Ãµes de prediÃ§Ã£o por estado
-#       # TODO: Avaliar o calculo retirando os valores de outlier 1.5 * IQR
-#       # prediÃ§Ã£o no primeiro conjunto treinamento - demais validaÃ§Ã£o
-#       if (is.null(summary_pred_stats))
-#       {
-#          # filtrar os valores que sao estados finais pois distorcem a media
-#          incidentevtlog_anot_st <- events_anot[events_anot$remaining_stc > 0,]
-# 
-#          summary_set <- gen_summary_pred_fn(incidentevtlog_anot_st, 'set_state_id','remaining_stc')
-#          summary_mset <- gen_summary_pred_fn(incidentevtlog_anot_st, 'mset_state_id','remaining_stc')
-#          summary_seq <- gen_summary_pred_fn(incidentevtlog_anot_st, 'seq_state_id','remaining_stc')
-# 
-#          summary_sj_set <- gen_summary_pred_fn(incidentevtlog_anot_st, 'set_state_id','sojourn_set_stc')
-#          summary_sj_mset <- gen_summary_pred_fn(incidentevtlog_anot_st, 'mset_state_id','sojourn_mset_stc')
-#          summary_sj_seq <- gen_summary_pred_fn(incidentevtlog_anot_st, 'seq_state_id','sojourn_seq_stc')
-# 
-#          #armazena totais
-#          summary_pred_stats <- list(summary_set, summary_mset, summary_seq,
-#                                     summary_sj_set, summary_sj_mset, summary_sj_seq)
-#       }
-# 
-#       # atualiza predited values media, mediana e desvio padrão
-#       # set
-#       events_anot$remaining_stc_pset_mean <-
-#          summary_set$mean[match(events_anot$set_state_id, summary_set$set_state_id)] +
-#          summary_sj_set$mean[match(events_anot$set_state_id, summary_sj_set$set_state_id)] -
-#          events_anot$sojourn_set_stc
-#       events_anot$remaining_stc_pset_median <-
-#          summary_set$median[match(events_anot$set_state_id, summary_set$set_state_id)] +
-#          summary_sj_set$median[match(events_anot$set_state_id, summary_sj_set$set_state_id)] -
-#          events_anot$sojourn_set_stc
-#       events_anot$remaining_stc_pset_sd <-
-#          summary_set$sd[match(events_anot$set_state_id, summary_set$set_state_id)] +
-#          summary_sj_set$sd[match(events_anot$set_state_id, summary_sj_set$set_state_id)] -
-#          events_anot$sojourn_set_stc
-# 
-#       # multi set
-#       events_anot$remaining_stc_pmset_mean <-
-#          summary_mset$mean[match(events_anot$mset_state_id, summary_mset$mset_state_id)] +
-#          summary_sj_mset$mean[match(events_anot$mset_state_id, summary_sj_mset$mset_state_id)] -
-#          events_anot$sojourn_mset_stc
-#       events_anot$remaining_stc_pmset_median <-
-#          summary_mset$median[match(events_anot$mset_state_id, summary_mset$mset_state_id)] +
-#          summary_sj_mset$median[match(events_anot$mset_state_id, summary_sj_mset$mset_state_id)] -
-#          events_anot$sojourn_mset_stc
-#       events_anot$remaining_stc_pmset_sd <-
-#          summary_mset$sd[match(events_anot$mset_state_id, summary_mset$mset_state_id)] +
-#          summary_sj_mset$sd[match(events_anot$mset_state_id, summary_sj_mset$mset_state_id)] -
-#          events_anot$sojourn_mset_stc
-# 
-#       # sequence
-#       events_anot$remaining_stc_pseq_mean <-
-#          summary_seq$mean[match(events_anot$seq_state_id, summary_seq$seq_state_id)] +
-#          summary_sj_seq$mean[match(events_anot$seq_state_id, summary_sj_seq$seq_state_id)] -
-#          events_anot$sojourn_seq_stc
-#       events_anot$remaining_stc_pseq_median <-
-#          summary_seq$median[match(events_anot$seq_state_id, summary_seq$seq_state_id)] +
-#          summary_sj_seq$median[match(events_anot$seq_state_id, summary_sj_seq$seq_state_id)] -
-#          events_anot$sojourn_seq_stc
-#       events_anot$remaining_stc_pseq_sd <-
-#          summary_seq$sd[match(events_anot$seq_state_id, summary_seq$seq_state_id)] +
-#          summary_sj_seq$sd[match(events_anot$seq_state_id, summary_sj_seq$seq_state_id)] -
-#          events_anot$sojourn_seq_stc
-# 
-#       # remove valorers sem match para calculo erro
-#       incidentevtlog_anot_err <- na.omit(events_anot)
-#       # remove valores dos estados finais Target = 0 que distorcem a mÃ©dia
-#       # valores do ultimo estado serÃ£o sempre precisos
-#       incidentevtlog_anot_err <- incidentevtlog_anot_err[incidentevtlog_anot_err$remaining_stc > 0,]
-# 
-#       # calculo erro  MAPE e RMSPE todos os registros
-# 
-#       #MAPE(y_pred, y_true)
-#       mape_val <- c(
-#          MAPE(incidentevtlog_anot_err$remaining_stc_pset_mean, incidentevtlog_anot_err$remaining_stc),
-#          MAPE(incidentevtlog_anot_err$remaining_stc_pset_median, incidentevtlog_anot_err$remaining_stc),
-#          MAPE(incidentevtlog_anot_err$remaining_stc_pset_sd, incidentevtlog_anot_err$remaining_stc),
-#          MAPE(incidentevtlog_anot_err$remaining_stc_pmset_mean, incidentevtlog_anot_err$remaining_stc),
-#          MAPE(incidentevtlog_anot_err$remaining_stc_pmset_median, incidentevtlog_anot_err$remaining_stc),
-#          MAPE(incidentevtlog_anot_err$remaining_stc_pmset_sd, incidentevtlog_anot_err$remaining_stc),
-#          MAPE(incidentevtlog_anot_err$remaining_stc_pseq_mean, incidentevtlog_anot_err$remaining_stc),
-#          MAPE(incidentevtlog_anot_err$remaining_stc_pseq_median, incidentevtlog_anot_err$remaining_stc),
-#          MAPE(incidentevtlog_anot_err$remaining_stc_pseq_sd, incidentevtlog_anot_err$remaining_stc)
-#       )
-#       names(mape_val) <- c(
-#          "val_mape_pset_mean","val_mape_pset_median","val_mape_pset_sd",
-#          "val_mape_pmset_mean","val_mape_pmset_median","val_mape_pmset_sd",
-#          "val_mape_pseq_mean","val_mape_pseq_median","val_mape_pseq_sd"
-#       )
-#       mape_val
-# 
-#       #RMSPE(y_pred, y_true)
-#       rmspe_val <- c(
-#          RMSPE(incidentevtlog_anot_err$remaining_stc_pset_mean, incidentevtlog_anot_err$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err$remaining_stc_pset_median, incidentevtlog_anot_err$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err$remaining_stc_pset_sd, incidentevtlog_anot_err$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err$remaining_stc_pmset_mean, incidentevtlog_anot_err$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err$remaining_stc_pmset_median, incidentevtlog_anot_err$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err$remaining_stc_pmset_sd, incidentevtlog_anot_err$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err$remaining_stc_pseq_mean, incidentevtlog_anot_err$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err$remaining_stc_pseq_median, incidentevtlog_anot_err$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err$remaining_stc_pseq_sd, incidentevtlog_anot_err$remaining_stc)
-#       )
-#       names(rmspe_val) <- c(
-#          "val_rmspe_pset_mean","val_rmspe_pset_median","val_rmspe_pset_sd",
-#          "val_rmspe_pmset_mean","val_rmspe_pmset_median","val_rmspe_pmset_sd",
-#          "val_rmspe_pseq_mean","val_rmspe_pseq_median","val_rmspe_pseq_sd"
-#       )
-#       rmspe_val
-# 
-#       #non fitting
-#       non_fit_arr <- c(
-#          nrow(fold_events),
-#          nrow(events_anot),
-#          nrow(events_anot[events_anot$set_state_id == NIL_STATE,]),
-#          nrow(events_anot[events_anot$mset_state_id == NIL_STATE,]),
-#          nrow(events_anot[events_anot$seq_state_id == NIL_STATE,]),
-#          length(unique(events_anot$set_state_id)),
-#          length(unique(events_anot$mset_state_id)),
-#          length(unique(events_anot$seq_state_id))
-#       )
-#       names(non_fit_arr) <- c("num_evt_tot","num_evt_ok","num_evt_nf_set",
-#                               "num_evt_nf_mset","num_evt_nf_seq", "num_set_states",
-#                               "num_mset_states", "num_seq_states")
-#       #print(non_fit_arr)
-#       non_fit_per_arr <- c(
-#          non_fit_arr[c("num_evt_nf_set")] / non_fit_arr[c("num_evt_ok")],
-#          non_fit_arr[c("num_evt_nf_mset")] / non_fit_arr[c("num_evt_ok")],
-#          non_fit_arr[c("num_evt_nf_seq")] / non_fit_arr[c("num_evt_ok")]
-#       )
-#       names(non_fit_per_arr) <- c("perr_nf_set","perr_nf_mset","perr_nf_seq")
-# 
-#       non_fit_per_arr <- non_fit_per_arr * 100
-# 
-#       # retorna o menor erro - media ou mediana
-#       perr_tot_arr <- c(
-#          min(mape_val[c("val_mape_pset_mean")], mape_val[c("val_mape_pset_median")]),
-#          min(mape_val[c("val_mape_pmset_mean")], mape_val[c("val_mape_pmset_median")]),
-#          min(mape_val[c("val_mape_pseq_mean")], mape_val[c("val_mape_pseq_median")])
-#       )
-#       names(perr_tot_arr) <- c(
-#          "perr_tot_set","perr_tot_mset","perr_tot_seq"
-#       )
-#       perr_tot_arr
-# 
-#       # filtro para eventos com fit
-#       incidentevtlog_anot_err_set1 <- incidentevtlog_anot_err[incidentevtlog_anot_err$set_state_id != NIL_STATE,]
-#       incidentevtlog_anot_err_mset1 <- incidentevtlog_anot_err[incidentevtlog_anot_err$mset_state_id != NIL_STATE,]
-#       incidentevtlog_anot_err_seq1 <- incidentevtlog_anot_err[incidentevtlog_anot_err$seq_state_id != NIL_STATE,]
-#       #MAPE(y_pred, y_true)
-#       mape_val1 <- c(
-#          MAPE(incidentevtlog_anot_err_set1$remaining_stc_pset_mean, incidentevtlog_anot_err_set1$remaining_stc),
-#          MAPE(incidentevtlog_anot_err_set1$remaining_stc_pset_median, incidentevtlog_anot_err_set1$remaining_stc),
-#          MAPE(incidentevtlog_anot_err_set1$remaining_stc_pset_sd, incidentevtlog_anot_err_set1$remaining_stc),
-#          MAPE(incidentevtlog_anot_err_mset1$remaining_stc_pmset_mean, incidentevtlog_anot_err_mset1$remaining_stc),
-#          MAPE(incidentevtlog_anot_err_mset1$remaining_stc_pmset_median, incidentevtlog_anot_err_mset1$remaining_stc),
-#          MAPE(incidentevtlog_anot_err_mset1$remaining_stc_pmset_sd, incidentevtlog_anot_err_mset1$remaining_stc),
-#          MAPE(incidentevtlog_anot_err_seq1$remaining_stc_pseq_mean, incidentevtlog_anot_err_seq1$remaining_stc),
-#          MAPE(incidentevtlog_anot_err_seq1$remaining_stc_pseq_median, incidentevtlog_anot_err_seq1$remaining_stc),
-#          MAPE(incidentevtlog_anot_err_seq1$remaining_stc_pseq_sd, incidentevtlog_anot_err_seq1$remaining_stc)
-#       )
-#       names(mape_val1) <- c(
-#          "val_mape_pset_mean1","val_mape_pset_median1","val_mape_pset_sd1",
-#          "val_mape_pmset_mean1","val_mape_pmset_median1","val_mape_pmset_sd1",
-#          "val_mape_pseq_mean1","val_mape_pseq_median1","val_mape_pseq_sd1"
-#       )
-#       mape_val1
-# 
-#       rmspe_val1 <- c(
-#          RMSPE(incidentevtlog_anot_err_set1$remaining_stc_pset_mean, incidentevtlog_anot_err_set1$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err_set1$remaining_stc_pset_median, incidentevtlog_anot_err_set1$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err_set1$remaining_stc_pset_sd, incidentevtlog_anot_err_set1$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err_mset1$remaining_stc_pmset_mean, incidentevtlog_anot_err_mset1$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err_mset1$remaining_stc_pmset_median, incidentevtlog_anot_err_mset1$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err_mset1$remaining_stc_pmset_sd, incidentevtlog_anot_err_mset1$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err_seq1$remaining_stc_pseq_mean, incidentevtlog_anot_err_seq1$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err_seq1$remaining_stc_pseq_median, incidentevtlog_anot_err_seq1$remaining_stc),
-#          RMSPE(incidentevtlog_anot_err_seq1$remaining_stc_pseq_sd, incidentevtlog_anot_err_seq1$remaining_stc)
-#       )
-#       names(rmspe_val1) <- c(
-#          "val_rmspe_pset_mean1","val_rmspe_pset_median1","val_rmspe_pset_sd1",
-#          "val_rmspe_pmset_mean1","val_rmspe_pmset_median1","val_rmspe_pmset_sd1",
-#          "val_rmspe_pseq_mean1","val_rmspe_pseq_median1","val_rmspe_pseq_sd1"
-#       )
-#       rmspe_val1
-# 
-#       #non_fit_arr
-#       result <- rbind(
-#          result,
-#          c(mape_val, rmspe_val, non_fit_arr, non_fit_per_arr, perr_tot_arr,
-#            mape_val1, rmspe_val1)
-#       )
-#    }
-#    return(result)
-# }
-
+   sfilen <- file.path(filePath,paste(filePrefix,"_MODEL_PARAMS.csv",sep=""))
+   write.table(parameters, file=sfilen, row.names=FALSE, col.names = FALSE, sep=";", dec=",")
+   
+}
 
